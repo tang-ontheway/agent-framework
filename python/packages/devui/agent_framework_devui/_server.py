@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from ._conversations import ConversationItemValidationError
+from ._conversations import ConversationItemValidationError, ConversationMetadataValidationError
 from ._deployment import DeploymentManager
 from ._discovery import EntityDiscovery
 from ._executor import AgentFrameworkExecutor
@@ -1007,6 +1007,9 @@ class DevServer:
                 executor = await self._ensure_executor()
                 conversation = executor.conversation_store.create_conversation(metadata=metadata)
                 return conversation.model_dump()
+            except ConversationMetadataValidationError as e:
+                error = OpenAIError.create(str(e), type="invalid_request_error", code="invalid_metadata")
+                return JSONResponse(status_code=400, content=error.to_dict())
             except HTTPException:
                 raise
             except Exception as e:
@@ -1078,6 +1081,8 @@ class DevServer:
                 metadata = request_data.get("metadata", {})
                 conversation = executor.conversation_store.update_conversation(conversation_id, metadata=metadata)
                 return conversation.model_dump()
+            except ConversationMetadataValidationError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
             except ValueError as e:
                 raise HTTPException(status_code=404, detail=str(e)) from e
             except HTTPException:

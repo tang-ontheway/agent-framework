@@ -43,6 +43,54 @@ class ConversationItemValidationError(ValueError):
     """
 
 
+class ConversationMetadataValidationError(ValueError):
+    """The metadata of a conversation is not a map of string keys to string values.
+
+    Raised instead of a plain ValueError so routes can answer with a client
+    error for malformed metadata while a missing conversation stays 404.
+    """
+
+
+def validate_conversation_metadata(metadata: Any) -> dict[str, str]:
+    """Validate conversation metadata against the Conversations API contract.
+
+    Metadata is a map of string keys to string values. An explicit ``None`` is
+    accepted and normalized to an empty map, the same as a missing field.
+
+    Args:
+        metadata: The metadata value taken from a request body.
+
+    Returns:
+        The validated metadata map.
+
+    Raises:
+        ConversationMetadataValidationError: If the metadata is not a map of
+            string keys to string values.
+    """
+    if metadata is None:
+        return {}
+    if not isinstance(metadata, dict):
+        raise ConversationMetadataValidationError("metadata must be an object mapping string keys to string values")
+    invalid_values = [key for key, value in metadata.items() if not isinstance(value, str)]
+    if invalid_values:
+        raise ConversationMetadataValidationError(
+            "metadata values must be strings; invalid keys: " + ", ".join(sorted(str(key) for key in invalid_values))
+        )
+    return {str(key): value for key, value in metadata.items()}
+
+
+def _stored_metadata(metadata: Any) -> dict[str, str]:
+    """Return the stored metadata as a map, ignoring a value that is not one.
+
+    Metadata written before it was validated at the route boundary can be any
+    JSON value. Readers must not fail on it, so a value that is not a map is
+    reported as no metadata at all.
+    """
+    if not isinstance(metadata, dict):
+        return {}
+    return {str(key): value for key, value in metadata.items() if isinstance(value, str)}
+
+
 def _refusal_additional_properties() -> dict[str, Any]:
     return {
         "core": {_MODEL_OUTPUT_KIND_KEY: _MODEL_OUTPUT_REFUSAL},
@@ -255,6 +303,7 @@ class InMemoryConversationStore(ConversationStore):
         """Create a new conversation with message storage and checkpoint storage."""
         conv_id = conversation_id or f"conv_{uuid.uuid4().hex}"
         created_at = int(time.time())
+        metadata = validate_conversation_metadata(metadata)
 
         # Create message list for internal storage and AgentSession for execution
         messages: list[Message] = []
@@ -268,7 +317,7 @@ class InMemoryConversationStore(ConversationStore):
             "messages": messages,
             "session": session,
             "checkpoint_storage": checkpoint_storage,
-            "metadata": metadata or {},
+            "metadata": metadata,
             "created_at": created_at,
             "items": [],
             "traces": [],  # Trace events for context inspection (token usage, timing, etc.)
@@ -289,7 +338,7 @@ class InMemoryConversationStore(ConversationStore):
             id=conv_data["id"],
             object="conversation",
             created_at=conv_data["created_at"],
-            metadata=conv_data.get("metadata"),
+            metadata=_stored_metadata(conv_data.get("metadata")),
         )
 
     def update_conversation(self, conversation_id: str, metadata: dict[str, str]) -> Conversation:
@@ -298,13 +347,14 @@ class InMemoryConversationStore(ConversationStore):
         if not conv_data:
             raise ValueError(f"Conversation {conversation_id} not found")
 
-        conv_data["metadata"] = metadata
+        validated = validate_conversation_metadata(metadata)
+        conv_data["metadata"] = validated
 
         return Conversation(
             id=conv_data["id"],
             object="conversation",
             created_at=conv_data["created_at"],
-            metadata=metadata,
+            metadata=validated,
         )
 
     def delete_conversation(self, conversation_id: str) -> ConversationDeletedResource:
@@ -844,7 +894,7 @@ class InMemoryConversationStore(ConversationStore):
         """Filter conversations by metadata (e.g., agent_id)."""
         results: list[Conversation] = []
         for conv_data in self._conversations.values():
-            conv_meta = conv_data.get("metadata", {}).copy()  # Copy to avoid mutating original
+            conv_meta = _stored_metadata(conv_data.get("metadata"))  # Copy to avoid mutating original
 
             # Check if all filter items match
             if all(conv_meta.get(k) == v for k, v in metadata_filter.items()):
